@@ -5,6 +5,8 @@ import subprocess # Added for screenshot capture
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QComboBox, QSpacerItem, QSizePolicy)
 from PyQt6.QtCore import QTimer, QDateTime
+from .nudity_filter import NudityFilter # Import the filter using relative import
+import cv2 # For saving the blurred image if needed
 
 class BrandCenturyApp(QWidget):
     def __init__(self):
@@ -17,10 +19,15 @@ class BrandCenturyApp(QWidget):
 
         self.is_capturing = False
         self.screenshot_interval = 5000  # Default to 5 seconds (in milliseconds)
-        self.screenshots_base_dir = os.path.abspath("BrandCentury/Screenshots") # Use absolute path
 
-        # Ensure base screenshots directory exists (already done at startup of script)
-        # os.makedirs(self.screenshots_base_dir, exist_ok=True) # This is fine here, or can be in main part
+        # Define base directories
+        self.base_project_dir = os.path.abspath("BrandCentury")
+        self.screenshots_base_dir = os.path.join(self.base_project_dir, "Screenshots")
+        self.originals_base_dir = os.path.join(self.base_project_dir, "Originals")
+        self.blurred_base_dir = os.path.join(self.base_project_dir, "BlurredScreenshots")
+
+        # Initialize NudityFilter
+        self.nudity_filter = NudityFilter()
 
         self.init_ui()
 
@@ -127,52 +134,173 @@ class BrandCenturyApp(QWidget):
                 self.stop_capture()
             return False
 
-    def get_screenshot_filepath(self):
+    def _get_timestamped_filepath(self, base_dir):
         """
-        Generates a filepath for the new screenshot.
+        Generates a timestamped filepath within a daily subdirectory of base_dir.
         Ensures the daily subdirectory exists.
-        e.g., BrandCentury/Screenshots/YYYY-MM-DD/YYYYMMDD_HHMMSS.png
+        e.g., <base_dir>/YYYY-MM-DD/YYYYMMDD_HHMMSS.png
         """
         now = QDateTime.currentDateTime()
         current_date_str = now.toString("yyyy-MM-dd")
         timestamp_filename = now.toString("yyyyMMdd_HHmmss") + ".png"
 
-        daily_screenshot_dir = os.path.join(self.screenshots_base_dir, current_date_str)
+        # Ensure the specific base_dir (e.g., BrandCentury/Screenshots) exists
+        # This is generally good, though the startup code also creates them.
+        os.makedirs(base_dir, exist_ok=True)
 
-        # Create the daily directory if it doesn't exist
+        daily_dir = os.path.join(base_dir, current_date_str)
+
         try:
-            os.makedirs(daily_screenshot_dir, exist_ok=True)
+            os.makedirs(daily_dir, exist_ok=True) # Ensure daily subdir (e.g., <base_dir>/2023-01-01) exists
         except OSError as e:
-            print(f"Error creating directory {daily_screenshot_dir}: {e}")
+            print(f"Error creating directory {daily_dir}: {e}")
             self.status_label.setText(f"Status: Error creating dir {current_date_str}")
-            # Potentially stop capture if we can't create directories
             if self.is_capturing:
                 self.stop_capture()
-            return None
+            return None # Propagate error
 
-        return os.path.join(daily_screenshot_dir, timestamp_filename)
+        return os.path.join(daily_dir, timestamp_filename)
 
-    def capture_and_save_screenshot(self): # This will be implemented in 1.4 and 1.5 fully
-        filepath = self.get_screenshot_filepath()
-        if not filepath:
-            # Error already handled and message shown by get_screenshot_filepath
+    def capture_and_save_screenshot(self):
+        # 1. Define path for the original screenshot (raw capture)
+        # For initial capture, we can use a temporary path or save directly to "Originals" if nudity check is fast.
+        # Let's create a temporary file name first.
+        now = QDateTime.currentDateTime()
+        temp_filename = f"temp_capture_{now.toString('yyyyMMdd_HHmmss_zzz')}.png"
+        temp_filepath = os.path.join(self.base_project_dir, temp_filename) # Store temp in project root or a temp subfolder
+
+        # 2. Capture screenshot to this temporary path
+        if not self.capture_screenshot_os_native(temp_filepath):
+            self.status_label.setText("Status: Screen capture failed.")
+            # Consider deleting temp_filepath if it was partially created or empty
+            if os.path.exists(temp_filepath):
+                try:
+                    os.remove(temp_filepath)
+                except OSError:
+                    pass # Ignore if removal fails
             return
 
-        if self.capture_screenshot_os_native(filepath):
-            # Display only part of the path for brevity in status
-            display_path = os.path.join("...", os.path.basename(os.path.dirname(filepath)), os.path.basename(filepath))
-            self.status_label.setText(f"Status: Saved to {display_path}")
-        # If capture_screenshot_os_native fails, it sets its own error status.
+        # 3. Perform nudity detection on the captured image
+        try:
+            detected_boxes = self.nudity_filter.detect_nudity(temp_filepath)
+        except Exception as e: # Catch errors from NudeDetector loading or detection
+            print(f"Error during nudity detection process: {e}")
+            self.status_label.setText("Status: Nudity detection error.")
+            # Save the original screenshot to the main screenshot path as a fallback
+            # so data isn't lost, or handle as an error case without saving.
+            # For now, let's try to save it to the 'Screenshots' (unprocessed) path.
+            fallback_path = self._get_timestamped_filepath(self.screenshots_base_dir) # Corrected call
+            if fallback_path:
+                try:
+                    os.rename(temp_filepath, fallback_path)
+                    display_path = os.path.join("...", os.path.basename(os.path.dirname(fallback_path)), os.path.basename(fallback_path))
+                    self.status_label.setText(f"Status: Nudity err, saved to {display_path}")
+                except OSError as rename_err:
+                    print(f"Error moving temp file to fallback: {rename_err}")
+                    if os.path.exists(temp_filepath): os.remove(temp_filepath) # cleanup temp
+            else: # if fallback path generation failed
+                if os.path.exists(temp_filepath): os.remove(temp_filepath) # cleanup temp
+            return
+
+        # 4. Process based on detection results
+        final_saved_path = None
+        status_message_suffix = ""
+
+        if detected_boxes:
+            # Nudity detected - blur the image
+            print(f"Nudity detected in {temp_filepath}. Blurring...")
+            blurred_image_matrix = self.nudity_filter.blur_regions(temp_filepath, detected_boxes)
+
+            if blurred_image_matrix is not None:
+                # Save original to "Originals" directory
+                original_save_path = self._get_timestamped_filepath(self.originals_base_dir) # Corrected call
+                if original_save_path:
+                    try:
+                        os.rename(temp_filepath, original_save_path) # Move the original
+                        print(f"Original saved to {original_save_path}")
+                    except OSError as e:
+                        print(f"Error moving temp file to originals: {e}")
+                        # If move fails, original is still in temp_filepath. Decide on cleanup.
+                        # For now, we'll try to remove temp_filepath if blurred saving succeeds.
+
+                # Save blurred image to "BlurredScreenshots" directory
+                blurred_save_path = self._get_timestamped_filepath(self.blurred_base_dir) # Corrected call
+                if blurred_save_path:
+                    try:
+                        cv2.imwrite(blurred_save_path, blurred_image_matrix)
+                        final_saved_path = blurred_save_path
+                        status_message_suffix = " (blurred)"
+                        print(f"Blurred image saved to {blurred_save_path}")
+                        if original_save_path and os.path.exists(temp_filepath): # If original move failed but blur saved
+                            os.remove(temp_filepath) # remove the temp copy
+                    except Exception as e:
+                        print(f"Error saving blurred image: {e}")
+                        self.status_label.setText("Status: Error saving blurred image.")
+                        # Original might be in temp_filepath or moved to originals_save_path
+                        # if original_save_path exists and temp_filepath doesn't, original is safe.
+                        # if temp_filepath still exists, it's the original.
+                        if not original_save_path and os.path.exists(temp_filepath): # if original wasn't moved yet
+                             os.remove(temp_filepath) # remove temp to avoid confusion
+                else: # blurred_save_path generation failed
+                    self.status_label.setText("Status: Error creating path for blurred img.")
+                    if os.path.exists(temp_filepath): os.remove(temp_filepath)
+
+            else: # Blurring failed
+                print(f"Blurring failed for {temp_filepath}.")
+                self.status_label.setText("Status: Blurring failed.")
+                # Save original to "Screenshots" as fallback
+                fallback_path = self._get_timestamped_filepath(self.screenshots_base_dir) # Corrected call
+                if fallback_path:
+                    try:
+                        os.rename(temp_filepath, fallback_path)
+                        final_saved_path = fallback_path
+                    except OSError as e:
+                        print(f"Error moving temp file to fallback after blur fail: {e}")
+                        if os.path.exists(temp_filepath): os.remove(temp_filepath)
+                else:
+                    if os.path.exists(temp_filepath): os.remove(temp_filepath)
+        else:
+            # No nudity detected - save original to "Screenshots" directory
+            print(f"No nudity detected in {temp_filepath}. Saving as is.")
+            regular_save_path = self._get_timestamped_filepath(self.screenshots_base_dir) # Corrected call
+            if regular_save_path:
+                try:
+                    os.rename(temp_filepath, regular_save_path) # Move the original
+                    final_saved_path = regular_save_path
+                except OSError as e:
+                    print(f"Error moving temp file to screenshots: {e}")
+                    if os.path.exists(temp_filepath): os.remove(temp_filepath) # cleanup temp
+            else: # regular_save_path generation failed
+                if os.path.exists(temp_filepath): os.remove(temp_filepath) # cleanup temp
+
+        # Update status label
+        if final_saved_path:
+            display_path = os.path.join("...", os.path.basename(os.path.dirname(final_saved_path)), os.path.basename(final_saved_path))
+            self.status_label.setText(f"Status: Saved to {display_path}{status_message_suffix}")
+        elif not self.is_capturing : # If something went wrong and we are not capturing anymore
+            pass # Status already set by error condition or stop_capture
+        elif self.is_capturing and not final_saved_path and self.status_label.text().startswith("Status: Capturing"):
+            # If capture is ongoing but this specific save failed without specific error message
+            self.status_label.setText("Status: Error saving last screenshot.")
+
+        # Cleanup temp file if it somehow still exists and wasn't moved/deleted
+        if os.path.exists(temp_filepath) and temp_filepath != final_saved_path : # final_saved_path could be temp_filepath if rename failed but we treat it as saved
+            try:
+                if not (detected_boxes and blurred_image_matrix is None and final_saved_path and final_saved_path == temp_filepath) : # Avoid deleting if it became the fallback
+                    os.remove(temp_filepath)
+            except OSError as e:
+                print(f"Final cleanup error for temp file {temp_filepath}: {e}")
 
 
 if __name__ == '__main__':
-    # Ensure base screenshots directory exists at startup
-    # This was moved from __init__ to ensure it's created before app runs if main.py is moved
-    # and also to align with where BrandCentury/Screenshots is first mentioned in plan.
-    # However, the initial `mkdir -p BrandCentury/Screenshots` in bash setup already handles this.
-    # For robustness, we can ensure it here too.
-    base_screenshots_dir = os.path.abspath("BrandCentury/Screenshots")
-    os.makedirs(base_screenshots_dir, exist_ok=True)
+    # Ensure base directories exist at startup
+    project_dirs = [
+        os.path.abspath("BrandCentury/Screenshots"),
+        os.path.abspath("BrandCentury/Originals"),
+        os.path.abspath("BrandCentury/BlurredScreenshots")
+    ]
+    for p_dir in project_dirs:
+        os.makedirs(p_dir, exist_ok=True)
 
     app = QApplication(sys.argv)
     main_window = BrandCenturyApp()
