@@ -1,0 +1,17 @@
+[
+    {
+        "name": "SynthCore",
+        "keywords": ["SynthCore", "Synth Core", "SC"],
+        "logo_templates": ["logos/synthcore_logo.png"]
+    },
+    {
+        "name": "NovaWave",
+        "keywords": ["NovaWave", "Nova Wave", "NW"],
+        "logo_templates": ["logos/novawave_logo.png", "logos/novawave_icon.png"]
+    },
+    {
+        "name": "DataSphere",
+        "keywords": ["DataSphere", "Data Sphere", "DSphere"],
+        "logo_templates": []
+    }
+]

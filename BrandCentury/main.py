@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QComboBox, QSpacerItem, QSizePolicy)
 from PyQt6.QtCore import QTimer, QDateTime
 from .nudity_filter import NudityFilter # Import the filter using relative import
+from .brand_manager import BrandManager
+from .scanner_engine import ScannerEngine
 import cv2 # For saving the blurred image if needed
 
 class BrandCenturyApp(QWidget):
@@ -27,7 +29,27 @@ class BrandCenturyApp(QWidget):
         self.blurred_base_dir = os.path.join(self.base_project_dir, "BlurredScreenshots")
 
         # Initialize NudityFilter
-        self.nudity_filter = NudityFilter()
+        try:
+            self.nudity_filter = NudityFilter()
+        except Exception as e:
+            print(f"MainApp Error: Failed to initialize NudityFilter: {e}. Nudity filtering will be disabled.")
+            self.nudity_filter = None
+
+        # Initialize BrandManager and ScannerEngine
+        # Assuming brands.json is in the same directory as this script or a known path
+        # For robustness, use a path relative to this file's location or an absolute path.
+        # __file__ gives path to current file. os.path.dirname(__file__) gives its directory.
+        config_dir = os.path.dirname(__file__)
+        brands_config_path = os.path.join(config_dir, "brands.json")
+
+        try:
+            self.brand_manager = BrandManager(brands_config_path)
+            self.scanner_engine = ScannerEngine(self.brand_manager)
+        except Exception as e:
+            print(f"MainApp Error: Failed to initialize BrandManager or ScannerEngine: {e}. Brand scanning will be disabled.")
+            self.brand_manager = None
+            self.scanner_engine = None
+            # Potentially disable UI elements related to scanning if this occurs.
 
         self.init_ui()
 
@@ -290,6 +312,22 @@ class BrandCenturyApp(QWidget):
                     os.remove(temp_filepath)
             except OSError as e:
                 print(f"Final cleanup error for temp file {temp_filepath}: {e}")
+
+        # 5. Perform brand scanning on the final saved image (blurred or original)
+        if final_saved_path and self.scanner_engine:
+            print(f"\n--- Initiating Brand Scan for: {final_saved_path} ---")
+            scan_results = self.scanner_engine.scan_image(final_saved_path)
+            if scan_results:
+                print(f"--- Brand Scan Results for {os.path.basename(final_saved_path)} ---")
+                for item in scan_results:
+                    print(f"  - Brand: {item.get('brand_name')}, Type: {item.get('type')}, Details: {item.get('details', '')}, Confidence: {item.get('confidence', 'N/A')}")
+                    if item.get('box'):
+                        print(f"    Box: {item.get('box')}")
+                print("--- End of Brand Scan Results ---")
+            else:
+                print(f"--- No brands detected in {os.path.basename(final_saved_path)} ---")
+        elif not self.scanner_engine:
+            print("ScannerEngine not available. Skipping brand scan.")
 
 
 if __name__ == '__main__':
